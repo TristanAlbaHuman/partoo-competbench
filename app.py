@@ -556,10 +556,20 @@ with tab_ag:
         display["Pos. moy."] = display["Pos. moy."].round(1)
         display["Note"] = display["Note"].round(2)
         display["Avis moy."] = display["Avis moy."].round(0)
+        def color_score(val):
+            if pd.isna(val): return ""
+            color = "#1a3d1a" if val >= 70 else ("#3d3300" if val >= 40 else "#3d1a1a")
+            return f"background-color: {color}"
+
+        def color_pos(val):
+            if pd.isna(val): return ""
+            color = "#1a3d1a" if val <= 3 else ("#3d3300" if val <= 10 else "#3d1a1a")
+            return f"background-color: {color}"
+
         st.dataframe(
             display.sort_values("Score SEO", ascending=False)
-            .style.background_gradient(subset=["Score SEO"], cmap="RdYlGn")
-                  .background_gradient(subset=["Pos. moy."], cmap="RdYlGn_r"),
+            .style.applymap(color_score, subset=["Score SEO"])
+                  .applymap(color_pos, subset=["Pos. moy."]),
             use_container_width=True,
             height=420,
         )
