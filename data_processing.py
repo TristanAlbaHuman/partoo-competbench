@@ -2,6 +2,8 @@ import pandas as pd
 import re
 import streamlit as st
 import math
+import time
+import os
 
 DEPT_NAMES = {
     "01": "Ain", "02": "Aisne", "03": "Allier", "04": "Alpes-de-Haute-Provence",
@@ -66,17 +68,6 @@ def extract_cp(addr):
     return m.group(1) if m else None
 
 
-def approx_coords(cp, dept, nom):
-    import hashlib
-    if dept and dept in DEPT_CENTROIDS:
-        base_lat, base_lon = DEPT_CENTROIDS[dept]
-        h = int(hashlib.md5(f"{cp}{nom}".encode()).hexdigest()[:8], 16)
-        lat_jitter = ((h % 1000) - 500) / 1000 * 0.4
-        lon_jitter = ((h // 1000 % 1000) - 500) / 1000 * 0.4
-        return round(base_lat + lat_jitter, 5), round(base_lon + lon_jitter, 5)
-    return None, None
-
-
 def haversine_km(lat1, lon1, lat2, lon2):
     R = 6371
     dlat = math.radians(lat2 - lat1)
@@ -85,9 +76,65 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return R * 2 * math.asin(math.sqrt(a))
 
 
+def fallback_coords(cp, dept, nom):
+    """Fallback: department centroid only (no jitter, labeled as approximate)."""
+    import hashlib
+    if dept and dept in DEPT_CENTROIDS:
+        base_lat, base_lon = DEPT_CENTROIDS[dept]
+        h = int(hashlib.md5(f"{cp}{nom}".encode()).hexdigest()[:8], 16)
+        lat_j = ((h % 1000) - 500) / 1000 * 0.15
+        lon_j = ((h // 1000 % 1000) - 500) / 1000 * 0.15
+        return round(base_lat + lat_j, 5), round(base_lon + lon_j, 5), True  # True = approximate
+    return None, None, True
+
+
+@st.cache_data(show_spinner=False)
+def geocode_nominatim_batch(addresses: tuple) -> dict:
+    """
+    Geocode a batch of addresses via Nominatim.
+    Called only on Streamlit Cloud (has internet access).
+    Returns dict {address: (lat, lon)}.
+    """
+    import requests
+    HEADERS = {"User-Agent": "PartooSEODashboard/2.0"}
+    results = {}
+    for addr in addresses:
+        try:
+            r = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": addr, "format": "json", "limit": 1, "countrycodes": "fr"},
+                headers=HEADERS, timeout=6,
+            )
+            data = r.json()
+            if data:
+                results[addr] = (float(data[0]["lat"]), float(data[0]["lon"]))
+            else:
+                results[addr] = (None, None)
+        except:
+            results[addr] = (None, None)
+        time.sleep(1.05)
+    return results
+
+
+def load_coords_csv(coords_path="coords.csv") -> dict:
+    """Load pre-geocoded coords from CSV. Returns {address: (lat, lon)}."""
+    if not os.path.exists(coords_path):
+        return {}
+    try:
+        df = pd.read_csv(coords_path, encoding="utf-8")
+        result = {}
+        for _, row in df.iterrows():
+            if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+                result[str(row["adresse"])] = (float(row["lat"]), float(row["lon"]))
+        return result
+    except Exception as e:
+        return {}
+
+
 @st.cache_data(show_spinner="Chargement des données…")
-def load_excel(file_bytes: bytes, periode: str) -> dict:
-    import io, hashlib
+def load_excel(file_bytes: bytes, periode: str, coords_csv_bytes: bytes = b"") -> dict:
+    import io, tempfile
+
     xl = pd.ExcelFile(io.BytesIO(file_bytes))
 
     df_gen = pd.read_excel(xl, sheet_name="Statistiques générales")
@@ -98,61 +145,79 @@ def load_excel(file_bytes: bytes, periode: str) -> dict:
     df_det["dept"] = df_det["cp"].apply(lambda x: x[:2] if isinstance(x, str) else None)
     df_det["Notation"] = pd.to_numeric(df_det["Notation"], errors="coerce")
 
+    # Load coords lookup
+    coords_lookup = {}
+    if coords_csv_bytes:
+        try:
+            df_coords = pd.read_csv(io.BytesIO(coords_csv_bytes), encoding="utf-8")
+            for _, row in df_coords.iterrows():
+                if pd.notna(row.get("lat")) and pd.notna(row.get("lon")):
+                    coords_lookup[str(row["adresse"]).strip()] = (float(row["lat"]), float(row["lon"]))
+        except:
+            pass
+    else:
+        coords_lookup = load_coords_csv()
+
+    def get_coords(addr, cp, dept, nom):
+        key = str(addr).strip() if addr else ""
+        if key in coords_lookup:
+            return coords_lookup[key][0], coords_lookup[key][1], False  # False = precise
+        return fallback_coords(cp, dept, nom)
+
+    # Human reference
     df_human = df_det[df_det["Concurrents"].isna()].copy()
     ref = (
         df_human.groupby("Business Id")
-        .agg(
-            nom=("Nom de l'établissement", "first"),
-            adresse=("Adresse", "first"),
-            cp=("cp", "first"),
-            dept=("dept", "first"),
-        )
+        .agg(nom=("Nom de l'établissement", "first"), adresse=("Adresse", "first"),
+             cp=("cp", "first"), dept=("dept", "first"))
         .reset_index()
     )
     ref["dept_label"] = ref["dept"].map(DEPT_NAMES)
+
+    ref["lat"] = None
+    ref["lon"] = None
+    ref["approx"] = True
     for idx, row in ref.iterrows():
-        lat, lon = approx_coords(row["cp"], row["dept"], row["nom"])
+        lat, lon, approx = get_coords(row["adresse"], row["cp"], row["dept"], row["nom"])
         ref.at[idx, "lat"] = lat
         ref.at[idx, "lon"] = lon
+        ref.at[idx, "approx"] = approx
 
+    precise_pct = int((~ref["approx"]).sum() / max(len(ref), 1) * 100)
+
+    # Classées
     df_cl = pd.read_excel(xl, sheet_name="Établissements classés")
-    df_cl = df_cl.merge(ref[["Business Id", "cp", "dept", "dept_label", "lat", "lon"]], on="Business Id", how="left")
+    df_cl = df_cl.merge(ref[["Business Id", "cp", "dept", "dept_label", "lat", "lon", "approx"]], on="Business Id", how="left")
     df_cl["Notation"] = pd.to_numeric(df_cl["Notation"], errors="coerce")
     df_cl["periode"] = periode
     df_cl["statut"] = df_cl["Position"].apply(
         lambda x: "Top 3" if x <= 3 else ("Top 5" if x <= 5 else ("Top 10" if x <= 10 else "Hors Top 10"))
     )
 
+    # Non classées
     df_nc = pd.read_excel(xl, sheet_name="Établissements non classés")
-    df_nc = df_nc.merge(ref[["Business Id", "cp", "dept", "dept_label", "lat", "lon"]], on="Business Id", how="left")
+    df_nc = df_nc.merge(ref[["Business Id", "cp", "dept", "dept_label", "lat", "lon", "approx"]], on="Business Id", how="left")
     df_nc["periode"] = periode
 
+    # Competitors
     df_conc = df_det[df_det["Concurrents"].notna()].copy()
     conc_agg = (
         df_conc.groupby(["Nom de l'établissement", "Concurrents", "Adresse"])
-        .agg(
-            cp=("cp", "first"),
-            dept=("dept", "first"),
-            pos_moy=("Position", "mean"),
-            pos_min=("Position", "min"),
-            notation=("Notation", "mean"),
-            reviews=("reviews", "mean"),
-            mots=("Mot-clé", lambda x: list(x.unique())),
-        )
+        .agg(cp=("cp", "first"), dept=("dept", "first"),
+             pos_moy=("Position", "mean"), pos_min=("Position", "min"),
+             notation=("Notation", "mean"), reviews=("reviews", "mean"),
+             mots=("Mot-clé", lambda x: list(x.unique())))
         .reset_index()
     )
+    conc_agg["lat"] = None
+    conc_agg["lon"] = None
+    conc_agg["approx"] = True
     for idx, row in conc_agg.iterrows():
-        lat, lon = approx_coords(row["cp"], row["dept"], row["Nom de l'établissement"])
+        lat, lon, approx = get_coords(row["Adresse"], row["cp"], row["dept"], row["Nom de l'établissement"])
         conc_agg.at[idx, "lat"] = lat
         conc_agg.at[idx, "lon"] = lon
-    conc_agg.rename(columns={
-        "Nom de l'établissement": "nom",
-        "Concurrents": "reseau",
-        "Adresse": "adresse"
-    }, inplace=True)
-
-    # FIXED: only Human agency names for the filter
-    human_names = sorted(ref["nom"].unique().tolist())
+        conc_agg.at[idx, "approx"] = approx
+    conc_agg.rename(columns={"Nom de l'établissement": "nom", "Concurrents": "reseau", "Adresse": "adresse"}, inplace=True)
 
     return {
         "generales": df_gen,
@@ -163,7 +228,9 @@ def load_excel(file_bytes: bytes, periode: str) -> dict:
         "periode": periode,
         "mots_cles": sorted(df_cl["Mot-clé"].unique().tolist()),
         "depts": sorted(ref["dept"].dropna().unique().tolist()),
-        "human_names": human_names,
+        "human_names": sorted(ref["nom"].unique().tolist()),
+        "precise_pct": precise_pct,
+        "coords_loaded": bool(coords_lookup),
     }
 
 
@@ -180,6 +247,8 @@ def merge_datasets(datasets: list) -> dict:
         "mots_cles": datasets[-1]["mots_cles"],
         "depts": datasets[-1]["depts"],
         "human_names": datasets[-1]["human_names"],
+        "precise_pct": datasets[-1].get("precise_pct", 0),
+        "coords_loaded": datasets[-1].get("coords_loaded", False),
     }
 
 
@@ -231,9 +300,12 @@ def get_competitors_in_radius(agency_lat, agency_lon, conc_df, radius_km=5):
     for _, row in conc_df.iterrows():
         if row["lat"] is None or row["lon"] is None:
             continue
-        dist = haversine_km(agency_lat, agency_lon, row["lat"], row["lon"])
-        if dist <= radius_km:
-            result.append({**row.to_dict(), "distance_km": round(dist, 2)})
+        try:
+            dist = haversine_km(float(agency_lat), float(agency_lon), float(row["lat"]), float(row["lon"]))
+            if dist <= radius_km:
+                result.append({**row.to_dict(), "distance_km": round(dist, 2)})
+        except:
+            continue
     if not result:
         return pd.DataFrame()
     return pd.DataFrame(result).sort_values("pos_moy")

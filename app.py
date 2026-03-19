@@ -90,18 +90,21 @@ with st.sidebar:
     st.divider()
 
     st.markdown("**📂 Imports PARTOO**")
-    uploaded = st.file_uploader("Charger export(s) .xlsx", type=["xlsx"], accept_multiple_files=True)
+    uploaded = st.file_uploader("Export(s) .xlsx", type=["xlsx"], accept_multiple_files=True)
+    coords_file = st.file_uploader("coords.csv (GPS précis)", type=["csv"],
+        help="Optionnel — lancez geocode_addresses.py en local pour générer ce fichier.")
+    coords_bytes = coords_file.read() if coords_file else b""
 
     DEFAULT = "sample_data.xlsx"
     datasets = []
     if uploaded:
         for f in uploaded:
             periode = f.name.replace(".xlsx", "").replace("_", " ")
-            datasets.append(load_excel(f.read(), periode))
+            datasets.append(load_excel(f.read(), periode, coords_bytes))
     else:
         try:
             with open(DEFAULT, "rb") as f:
-                datasets.append(load_excel(f.read(), "Mars 2026"))
+                datasets.append(load_excel(f.read(), "Mars 2026", coords_bytes))
             st.caption("📌 Démo : export Mars 2026")
         except FileNotFoundError:
             st.warning("Chargez un export PARTOO pour commencer.")
@@ -395,6 +398,12 @@ with tab_ag:
 # ══════════════════════════════════════════════
 with tab_map:
     st.markdown('<div class="section-hdr">Carte SEO Local – Agences & Concurrents</div>', unsafe_allow_html=True)
+    
+    precise_pct = data.get("precise_pct", 0)
+    if not data.get("coords_loaded"):
+        st.warning("⚠️ **Coordonnées approximatives** — les positions sont estimées par code postal. Pour une carte précise, lancez  en local et uploadez le fichier  dans la sidebar.")
+    else:
+        st.success(f"✅ **{precise_pct}% des agences géocodées précisément** depuis coords.csv")
 
     # Build per-agency stats for map
     ag_map_stats = (cl.groupby(["Business Id","Nom de l'établissement","dept","dept_label","lat","lon"])
