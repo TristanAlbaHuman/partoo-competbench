@@ -6,7 +6,6 @@ import folium
 from streamlit_folium import st_folium
 import io
 
-from pages.intelligence_gbp import render as render_gbp
 from pages_gbp import render_gbp_tab
 from data_processing import (
     load_excel, merge_datasets, apply_filters,
