@@ -6,6 +6,8 @@ import folium
 from streamlit_folium import st_folium
 import io
 
+from pages.intelligence_gbp import render as render_gbp
+from pages_gbp import render_gbp_tab
 from data_processing import (
     load_excel, merge_datasets, apply_filters,
     seo_score, get_priorite, DEPT_NAMES,
@@ -148,8 +150,9 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-tab_ov, tab_bench, tab_ag, tab_map, tab_plan = st.tabs([
-    "◈  Vue d'ensemble", "⊕  Benchmark", "◎  Agences", "🗺  Carte", "◆  Plans d'action",
+tab_ov, tab_bench, tab_ag, tab_map, tab_gbp, tab_plan = st.tabs([
+    "◈  Vue d'ensemble", "⊕  Benchmark", "◎  Agences", "🗺  Carte",
+    "🎯  Intelligence GBP", "◆  Plans d'action",
 ])
 
 # ══════════════════════════════════════════════
@@ -644,8 +647,19 @@ with tab_map:
 
 
 # ══════════════════════════════════════════════
-# TAB 5 – PLANS D'ACTION
+# TAB 5 – INTELLIGENCE GBP
 # ══════════════════════════════════════════════
+with tab_gbp:
+    render_gbp(data, f, total_mots)
+
+
+# ══════════════════════════════════════════════
+# TAB 6 – PLANS D'ACTION
+# ══════════════════════════════════════════════
+with tab_gbp:
+    render_gbp_tab(data, f, sel_mots, sel_depts, sel_agences)
+
+
 with tab_plan:
     ag_map2: dict = {}
     for _, row in cl.iterrows():

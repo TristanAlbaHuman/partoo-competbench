@@ -225,6 +225,7 @@ def load_excel(file_bytes: bytes, periode: str, coords_csv_bytes: bytes = b"") -
         "non_classees": df_nc,
         "ref": ref,
         "concurrents_geo": conc_agg,
+        "_df_det": df_det,
         "periode": periode,
         "mots_cles": sorted(df_cl["Mot-clé"].unique().tolist()),
         "depts": sorted(ref["dept"].dropna().unique().tolist()),
