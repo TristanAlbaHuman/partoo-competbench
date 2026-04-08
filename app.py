@@ -5,31 +5,20 @@ import plotly.graph_objects as go
 from textblob import Blobber
 from textblob_fr import PatternTagger, PatternAnalyzer
 
-# Initialisation de l'analyseur de sentiment (Français)
+# Initialisation Sentiment
 try:
     tb = Blobber(pos_tagger=PatternTagger(), analyzer=PatternAnalyzer())
-except Exception:
+except:
     tb = None
 
-st.set_page_config(page_title="Human BI - Direction Hub", layout="wide")
+st.set_page_config(page_title="Human BI - Pilotage GMB", layout="wide")
 
-# --- DESIGN & CSS ---
-st.markdown("""
-    <style>
-    .stMetric { background-color: #ffffff; padding: 20px; border-radius: 10px; border: 1px solid #e1e4e8; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    .action-card { padding: 1.5rem; border-radius: 0.5rem; margin-bottom: 1rem; border-left: 5px solid #ff4b4b; background-color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { background-color: #f1f3f6; border-radius: 4px 4px 0 0; padding: 10px 20px; font-weight: 600; }
-    .stTabs [aria-selected="true"] { background-color: #ffffff; border-top: 3px solid #ff4b4b; color: #ff4b4b !important; }
-    </style>
-    """, unsafe_allow_html=True)
+# --- FONCTIONS TECHNIQUES ---
 
-# --- FONCTIONS DE NETTOYAGE ---
-
-def clean_column_list(column_names):
+def clean_cols(df_cols):
     new_cols = []
     seen = {}
-    for c in column_names:
+    for c in df_cols:
         c_str = str(c).strip().replace('\n', ' ')
         if c_str in seen:
             seen[c_str] += 1
@@ -41,139 +30,139 @@ def clean_column_list(column_names):
 
 def get_sentiment(text):
     if not tb or pd.isna(text) or str(text).strip() == "": return 0
-    try:
-        return tb(str(text)).sentiment[0]
-    except:
-        return 0
+    return tb(str(text)).sentiment[0]
 
 # --- LOADERS ---
 
-def load_avis_data(files):
+def load_avis(files):
     all_df = []
     for f in files:
-        df = pd.read_excel(f, skiprows=1) if f.name.endswith('.xlsx') else pd.read_csv(f, skiprows=1)
-        df.columns = clean_column_list(df.columns)
-        mapping = {
-            'date_cr': ['date de création'], 'note': ['rating', 'note'],
-            'agence': ['nom de l\'établissement', 'agence'], 'groupe': ['groupes'],
-            'verbatim': ['content', 'avis', 'commentaire'],
-            'reponse': ['réponse'], 'date_rep': ['date de la réponse']
-        }
+        df = pd.read_excel(f, skiprows=1)
+        df.columns = clean_cols(df.columns)
+        mapping = {'date': ['date de création'], 'note': ['rating', 'note'], 'agence': ['nom de l\'établissement'], 'verbatim': ['content', 'avis', 'commentaire'], 'reponse': ['réponse']}
         for final, keys in mapping.items():
             for c in df.columns:
                 if any(k in c.lower() for k in keys) and final not in df.columns:
                     df = df.rename(columns={c: final})
-        if 'verbatim' in df.columns and tb:
+        if 'verbatim' in df.columns:
             df['sentiment'] = df['verbatim'].apply(get_sentiment)
         all_df.append(df)
     return pd.concat(all_df, ignore_index=True) if all_df else pd.DataFrame()
 
-def load_performance_data(files):
+def load_stats(files):
     all_df = []
     for f in files:
-        df_raw = pd.read_excel(f, header=None) if f.name.endswith('.xlsx') else pd.read_csv(f, header=None)
+        df_raw = pd.read_excel(f, header=None)
         h1 = df_raw.iloc[0].ffill().fillna('')
         h2 = df_raw.iloc[1].fillna('')
-        combined_names = [f"{str(a)} {str(b)}".strip() for a, b in zip(h1, h2)]
-        df_raw.columns = clean_column_list(combined_names)
+        df_raw.columns = clean_cols([f"{str(a)} {str(b)}".strip() for a, b in zip(h1, h2)])
         df = df_raw.iloc[2:].copy()
         df = df.rename(columns={df.columns[0]: 'date', df.columns[3]: 'agence', df.columns[5]: 'groupe'})
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
         for col in df.columns:
             if any(k in col.lower() for k in ['vues', 'recherche', 'appels', 'visites', 'itinéraire']):
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
         all_df.append(df)
     return pd.concat(all_df, ignore_index=True) if all_df else pd.DataFrame()
 
-# --- SIDEBAR ---
+# --- SIDEBAR & FILTRES ---
 st.sidebar.title("🏢 Human BI Engine")
+u_avis = st.sidebar.file_uploader("📥 Avis (2021-25)", type=["xlsx"], accept_multiple_files=True)
+u_stats = st.sidebar.file_uploader("📥 Stats (2024-25)", type=["xlsx"], accept_multiple_files=True)
 
-with st.sidebar.expander("📥 1. LOADER AVIS", expanded=True):
-    u_avis = st.file_uploader("Fichiers Avis", type=["xlsx", "csv"], accept_multiple_files=True, key="avis_up")
+df_av = load_avis(u_avis) if u_avis else pd.DataFrame()
+df_st = load_stats(u_stats) if u_stats else pd.DataFrame()
 
-with st.sidebar.expander("📥 2. LOADER PERFORMANCE", expanded=True):
-    u_stats = st.file_uploader("Fichiers Performance", type=["xlsx", "csv"], accept_multiple_files=True, key="stats_up")
-
-df_av = load_avis_data(u_avis) if u_avis else pd.DataFrame()
-df_st = load_performance_data(u_stats) if u_stats else pd.DataFrame()
-
-# --- FILTRES (CORRECTION DU TYPEERROR ICI) ---
 if not df_av.empty or not df_st.empty:
     st.sidebar.divider()
-    
-    # Récupération des agences de façon sécurisée (on force tout en string pour le tri)
-    list_ag_av = df_av['agence'].astype(str).dropna().unique().tolist() if (not df_av.empty and 'agence' in df_av.columns) else []
-    list_ag_st = df_st['agence'].astype(str).dropna().unique().tolist() if (not df_st.empty and 'agence' in df_st.columns) else []
-    
-    all_ag = sorted(list(set(list_ag_av + list_ag_st)))
-    
+    all_ag = sorted(list(set(df_av['agence'].astype(str).unique().tolist() if not df_av.empty else []) + (df_st['agence'].astype(str).unique().tolist() if not df_st.empty else [])))
     sel_ag = st.sidebar.selectbox("🎯 Agence à piloter", ["Toutes"] + all_ag)
-
+    
     if sel_ag != "Toutes":
-        if not df_av.empty and 'agence' in df_av.columns:
-            df_av = df_av[df_av['agence'].astype(str) == sel_ag]
-        if not df_st.empty and 'agence' in df_st.columns:
-            df_st = df_st[df_st['agence'].astype(str) == sel_ag]
+        if not df_av.empty: df_av = df_av[df_av['agence'] == sel_ag]
+        if not df_st.empty: df_st = df_st[df_st['agence'] == sel_ag]
 
 # --- DASHBOARD ---
-st.title("🛡️ Pilotage Direction - Human Immobilier")
+st.title("🛡️ Dashboard Stratégique Human Immobilier")
 
 if df_av.empty and df_st.empty:
-    st.info("Veuillez charger les fichiers dans la barre latérale.")
+    st.info("Chargez les fichiers dans la sidebar pour activer l'analyse.")
 else:
-    # --- PLAN D'ACTION ---
-    st.subheader("📋 Plan d'Action Directeur")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("<div class='action-card'><strong>🚀 Présence & SEO</strong><br>", unsafe_allow_html=True)
-        if not df_st.empty:
-            vues = df_st.filter(like='vues').sum().sum()
-            iti = df_st.filter(like='itinéraire').sum().sum()
-            ratio = (iti/vues*100) if vues > 0 else 0
-            if ratio < 3: st.write(f"⚠️ Conversion Itinéraire faible ({ratio:.1f}%). Revoyez vos photos GMB.")
-            else: st.write(f"✅ Excellente attractivité ({ratio:.1f}%).")
-        else: st.write("Aucune donnée de performance chargée.")
-        st.markdown("</div>", unsafe_allow_html=True)
+    tab1, tab2 = st.tabs(["⭐ RÉPUTATION & SENTIMENT", "🚀 VISIBILITÉ MAPS"])
 
-    with c2:
-        st.markdown("<div class='action-card'><strong>⭐ E-Réputation</strong><br>", unsafe_allow_html=True)
-        if not df_av.empty:
-            no_rep = df_av['reponse'].isna().sum() if 'reponse' in df_av.columns else 0
-            if no_rep > 0: st.write(f"🚨 {no_rep} avis n'ont pas de réponse !")
-            if 'note' in df_av.columns and df_av['note'].mean() < 4.5: st.write("📉 Note moyenne < 4.5.")
-        else: st.write("Aucune donnée d'avis chargée.")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # --- TABS ---
-    t1, t2, t3 = st.tabs(["⭐ Réputation & Sentiment", "📈 Visibilité Maps", "🏆 Benchmark"])
-
-    with t1:
-        if not df_av.empty:
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Note Moyenne", f"{df_av['note'].mean():.2f} ⭐")
-            if 'sentiment' in df_av.columns:
-                m2.metric("Indice Sentiment", f"{df_av['sentiment'].mean():.2f}")
-            m3.metric("Total Avis", len(df_av))
-            
-            df_av['Mois'] = pd.to_datetime(df_av['date_cr']).dt.to_period('M').dt.to_timestamp()
+    # --- ONGLET 1 : REPUTATION ---
+    with tab1:
+        st.header("Analyse de la Satisfaction Client")
+        
+        c1, c2 = st.columns([2, 1])
+        
+        with c1:
+            st.subheader("Histogramme de la note moyenne par mois")
+            df_av['date'] = pd.to_datetime(df_av['date'], errors='coerce')
+            df_av['Mois'] = df_av['date'].dt.to_period('M').dt.to_timestamp()
             evol = df_av.groupby('Mois')['note'].mean().reset_index()
-            st.plotly_chart(px.line(evol, x='Mois', y='note', markers=True, range_y=[0,5], title="Tendance satisfaction"), use_container_width=True)
-
-    with t2:
-        if not df_st.empty:
-            v_cols = [c for c in df_st.columns if 'vues' in c.lower()]
-            i_cols = [c for c in df_st.columns if any(k in c.lower() for k in ['appels', 'site web', 'itinéraire'])]
+            fig_hist = px.bar(evol, x='Mois', y='note', color='note', color_continuous_scale='RdYlGn', range_y=[0,5])
+            st.plotly_chart(fig_hist, use_container_width=True)
             
-            col_l, col_r = st.columns(2)
-            with col_l:
-                st.subheader("Source de Visibilité")
-                st.plotly_chart(px.line(df_st, x='date', y=v_cols), use_container_width=True)
-            with col_r:
-                st.subheader("Actions Clients")
-                st.plotly_chart(px.bar(df_st, x='date', y=i_cols), use_container_width=True)
+        with c2:
+            st.subheader("Répartition des Avis")
+            fig_pie = px.pie(df_av, names='note', hole=0.4, color='note', color_discrete_map={5:'#27ae60', 4:'#2ecc71', 3:'#f1c40f', 2:'#e67e22', 1:'#e74c3c'})
+            st.plotly_chart(fig_pie, use_container_width=True)
 
-    with t3:
-        if not df_av.empty:
-            st.subheader("Benchmark Agences du Groupe")
-            bench = df_av.groupby('agence').agg({'note':'mean', 'date_cr':'count'}).reset_index()
-            st.dataframe(bench.sort_values('note', ascending=False), use_container_width=True)
+        st.divider()
+        st.subheader("💬 Analyse des Sentiments & Verbatims")
+        col_sent1, col_sent2 = st.columns([1, 2])
+        
+        with col_sent1:
+            avg_sent = df_av['sentiment'].mean()
+            st.metric("Score de Sentiment", f"{avg_sent:.2f}", delta="Positif" if avg_sent > 0 else "Négatif")
+            st.info("""
+            **C'est quoi ?** L'analyse de sentiment scanne les mots utilisés. 
+            - Proche de 1 : Les clients sont ravis (mots : 'super', 'merci').
+            - Proche de -1 : Colère ou déception.
+            """)
+        
+        with col_sent2:
+            st.write("**Exemples concrets (Avis récents) :**")
+            # Top 3 Positifs et Top 3 Négatifs
+            if 'verbatim' in df_av.columns:
+                samples = pd.concat([df_av.sort_values('sentiment').head(3), df_av.sort_values('sentiment').tail(3)])
+                st.dataframe(samples[['note', 'verbatim', 'sentiment']], use_container_width=True)
+
+        with st.expander("💡 Comment améliorer votre Réputation sur Google ?"):
+            st.write("""
+            1. **Le taux de réponse :** Répondez à 100% des avis, même les 5/5 sans texte. Google adore la réactivité.
+            2. **Mots-clés dans les réponses :** Intégrez naturellement des mots comme "Vente appartement [Ville]" dans vos réponses pour booster le SEO local.
+            3. **Le 'Fraîcheur' Score :** Un avis 5/5 d'il y a 6 mois a moins de poids qu'un 4/5 de la semaine dernière. Sollicitez vos clients dès la signature de l'acte authentique.
+            """)
+
+    # --- ONGLET 2 : VISIBILITÉ MAPS ---
+    with tab2:
+        st.header("Analyse de la Visibilité & Performance")
+        
+        # On empile les graphiques verticalement comme demandé
+        if not df_st.empty:
+            df_st['date'] = pd.to_datetime(df_st['date'], errors='coerce')
+            
+            # Graphique 1 : Vues
+            st.subheader("1. Origine de votre Visibilité (Ordinateur vs Mobile)")
+            vues_cols = [c for c in df_st.columns if 'vues' in c.lower()]
+            fig_vues = px.line(df_st.sort_values('date'), x='date', y=vues_cols, title="Vues Google (Search & Maps)")
+            st.plotly_chart(fig_vues, use_container_width=True)
+            
+            st.info("**Analyse :** Si le Mobile domine largement, vos photos de couverture et vos horaires doivent être parfaits (usage en déplacement).")
+
+            # Graphique 2 : Actions
+            st.subheader("2. Actions Clients (Attractivité)")
+            act_cols = [c for c in df_st.columns if any(k in c.lower() for k in ['appels', 'site web', 'itinéraire'])]
+            fig_act = px.bar(df_st.sort_values('date'), x='date', y=act_cols, barmode='group', title="Conversion : Appels, Itinéraires et Clics Web")
+            st.plotly_chart(fig_act, use_container_width=True)
+
+            with st.expander("💡 Comment booster votre Visibilité Maps ?"):
+                st.write("""
+                1. **Photos Hebdomadaires :** Les fiches avec + de 100 photos reçoivent 500% de demandes d'itinéraires en plus. Postez des photos de vos nouvelles exclusivités.
+                2. **Attributs GBP :** Remplissez bien les attributs (Parking, Accessibilité, Rendez-vous en ligne).
+                3. **Le bouton 'Site Web' :** Assurez-vous que le lien pointe vers la page spécifique de l'agence et non la home nationale de Human Immobilier pour un meilleur SEO local.
+                4. **Google Posts :** Publiez vos actualités (nouveau conseiller, baisse de prix) une fois par semaine. C'est du contenu gratuit qui occupe de la place sur l'écran du client.
+                """)
+        else:
+            st.warning("Chargez les fichiers de Performance pour voir les graphiques.")
