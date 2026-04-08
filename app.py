@@ -3,135 +3,174 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-st.set_page_config(page_title="Human Immobilier - Business Intelligence", layout="wide")
+# Configuration de la page
+st.set_page_config(page_title="Human BI Dashboard", layout="wide")
 
-# --- STYLES CSS ---
-st.markdown("""
-    <style>
-    .main { background-color: #f5f7f9; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
-    </style>
-    """, unsafe_allow_html=True)
+# --- FONCTIONS TECHNIQUES ---
 
-# --- FONCTIONS DE TRAITEMENT ---
+def make_columns_unique(columns):
+    """Évite les erreurs de doublons dans les noms de colonnes."""
+    seen = {}
+    new_cols = []
+    for item in columns:
+        item_str = str(item).strip()
+        if item_str in seen:
+            seen[item_str] += 1
+            new_cols.append(f"{item_str}_{seen[item_str]}")
+        else:
+            seen[item_str] = 0
+            new_cols.append(item_str)
+    return new_cols
 
-def load_all_data(files):
+def load_and_process_files(uploaded_files):
     all_avis = []
     all_stats = []
-    
-    for f in files:
-        # On lit les premières lignes pour identifier le type
-        preview = pd.read_excel(f, header=None, nrows=5)
-        header_content = str(preview.iloc[2].values).lower()
 
-        # TRAITEMENT STATS (Performances)
-        if any(k in header_content for k in ["recherche", "action", "vue"]):
+    for f in uploaded_files:
+        # Lecture initiale pour détection (ligne 2/3 contient les titres)
+        df_detect = pd.read_excel(f, header=None, nrows=5)
+        
+        # On vérifie le contenu de la ligne 2 (index 1) ou 3 (index 2)
+        row_content = str(df_detect.iloc[1:3].values).lower()
+
+        # --- CAS 1 : STATISTIQUES (KPIs de performance) ---
+        if any(k in row_content for k in ["vues", "recherche", "appels", "itinéraire"]):
             df = pd.read_excel(f, header=None)
-            h1 = df.iloc[1].ffill().fillna('')
-            h2 = df.iloc[2].fillna('')
-            df.columns = [f"{str(a)} - {str(b)}".strip(" -") for a, b in zip(h1, h2)]
-            df = df.iloc[3:].copy()
-            df['Source'] = 'Stats'
-            all_stats.append(df)
+            # Fusion des lignes 1 et 2 pour créer des entêtes propres
+            h1 = df.iloc[0].ffill().fillna('')
+            h2 = df.iloc[1].fillna('')
+            df.columns = make_columns_unique([f"{str(a)} {str(b)}".strip() for a, b in zip(h1, h2)])
+            df = df.iloc[2:].copy()
             
-        # TRAITEMENT AVIS (Réputation)
+            # Conversion date
+            date_col = df.columns[0]
+            df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+            
+            # Conversion numérique des colonnes KPI
+            for col in df.columns:
+                if any(k in col.lower() for k in ["vues", "appels", "visites", "demandes", "recherches"]):
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
+            df['Source_Type'] = 'Stats'
+            all_stats.append(df)
+
+        # --- CAS 2 : AVIS (E-Réputation) ---
         else:
-            df = pd.read_excel(f, skiprows=2)
-            df.columns = [str(c).strip() for c in df.columns]
-            # Mapping flexible
-            mapping = {'Date': ['date'], 'Note': ['note', 'étoile'], 'Agence': ['établissement', 'agence']}
+            # Les avis ont souvent les titres en ligne 2 (skiprows=1)
+            df = pd.read_excel(f, skiprows=1)
+            df.columns = make_columns_unique([str(c).strip() for c in df.columns])
+            
+            # Mapping pour uniformiser
+            mapping = {
+                'Date_Std': ['date de création', 'date'],
+                'Agence_Std': ['nom de l\'établissement', 'agence'],
+                'Note_Std': ['rating', 'note', 'étoile'],
+                'Groupe_Std': ['groupes', 'section']
+            }
             for final, keys in mapping.items():
                 for c in df.columns:
-                    if any(k in c.lower() for k in keys):
+                    if any(k in c.lower() for k in keys) and final not in df.columns:
                         df = df.rename(columns={c: final})
-            df['Source'] = 'Avis'
-            all_avis.append(df)
             
-    return pd.concat(all_avis) if all_avis else pd.DataFrame(), \
-           pd.concat(all_stats) if all_stats else pd.DataFrame()
+            if 'Date_Std' in df.columns:
+                df['Date_Std'] = pd.to_datetime(df['Date_Std'], errors='coerce')
+            if 'Note_Std' in df.columns:
+                df['Note_Std'] = pd.to_numeric(df['Note_Std'], errors='coerce')
+                
+            df['Source_Type'] = 'Avis'
+            all_avis.append(df)
 
-# --- CHARGEMENT ---
-files = st.sidebar.file_uploader("📥 Déposez vos exports Partoo (Avis & Stats)", accept_multiple_files=True)
+    final_avis = pd.concat(all_avis, ignore_index=True) if all_avis else pd.DataFrame()
+    final_stats = pd.concat(all_stats, ignore_index=True) if all_stats else pd.DataFrame()
+    
+    return final_avis, final_stats
+
+# --- INTERFACE ---
+
+st.title("📈 Dashboard BI - Human Immobilier")
+st.markdown("Analyse croisée de la **Visibilité** (Performance) et de la **Satisfaction** (Avis).")
+
+files = st.sidebar.file_uploader("📂 Déposez tous vos fichiers Excel (Avis & Stats)", accept_multiple_files=True)
 
 if files:
-    df_avis, df_stats = load_all_data(files)
-
-    # Nettoyage des dates et types
-    if not df_avis.empty:
-        df_avis['Date'] = pd.to_datetime(df_avis['Date'], errors='coerce')
-        df_avis['Note'] = pd.to_numeric(df_avis['Note'], errors='coerce')
-    if not df_stats.empty:
-        # On prend la première colonne comme date (Mois)
-        date_col_stats = df_stats.columns[0]
-        df_stats[date_col_stats] = pd.to_datetime(df_stats[date_col_stats], errors='coerce')
-        # Conversion numérique des colonnes de données
-        for col in df_stats.columns:
-            if " - " in col: df_stats[col] = pd.to_numeric(df_stats[col], errors='coerce')
+    with st.spinner('Analyse des fichiers en cours...'):
+        df_a, df_s = load_and_process_files(files)
 
     # --- FILTRES ---
-    st.sidebar.header("🔍 Facettes & Filtres")
-    # Agence unique ou Groupe
-    all_agences = sorted(df_avis['Agence'].unique().tolist()) if not df_avis.empty else []
-    sel_agence = st.sidebar.multiselect("Filtrer par Agence", all_agences, default=all_agences[:5] if all_agences else [])
-
-    # Application des filtres
-    if sel_agence:
-        df_avis_f = df_avis[df_avis['Agence'].isin(sel_agence)]
-        # Pour les stats, on cherche la colonne établissement
-        etab_col = next((c for c in df_stats.columns if "établissement" in c.lower()), None)
-        df_stats_f = df_stats[df_stats[etab_col].isin(sel_agence)] if etab_col else df_stats
-    else:
-        df_avis_f, df_stats_f = df_avis, df_stats
-
-    # --- DASHBOARD MAIN ---
-    st.title("📈 Business Intelligence - E-Réputation")
+    st.sidebar.header("🔍 Filtres")
     
-    # 1. KPIs FLASH
+    # Filtre Agence (commun aux deux types si possible)
+    liste_agences = []
+    if not df_a.empty: liste_agences += df_a['Agence_Std'].unique().tolist()
+    # On cherche une colonne agence dans les stats
+    col_etab_stats = ""
+    if not df_s.empty:
+        col_etab_stats = next((c for c in df_s.columns if "établissement" in c.lower() or "magasin" in c.lower()), "")
+        if col_etab_stats: liste_agences += df_s[col_etab_stats].unique().tolist()
+    
+    liste_agences = sorted(list(set([str(a) for a in liste_agences if str(a) != 'nan'])))
+    sel_agences = st.sidebar.multiselect("Sélectionner les agences", liste_agences, default=liste_agences[:2] if liste_agences else [])
+
+    # Filtrage des données
+    df_a_f = df_a[df_a['Agence_Std'].isin(sel_agences)] if not df_a.empty else df_a
+    df_s_f = df_s[df_s[col_etab_stats].isin(sel_agences)] if not df_s.empty and col_etab_stats else df_s
+
+    # --- AFFICHAGE KPIs FLASH ---
     c1, c2, c3, c4 = st.columns(4)
-    if not df_avis_f.empty:
-        c1.metric("Score Moyen", f"{df_avis_f['Note'].mean():.2f} ⭐")
-        c2.metric("Total Avis", f"{len(df_avis_f):,}")
-    if not df_stats_f.empty:
-        search_cols = [c for c in df_stats_f.columns if "recherche" in c.lower()]
-        action_cols = [c for c in df_stats_f.columns if "action" in c.lower()]
-        c3.metric("Recherches", f"{int(df_stats_f[search_cols].sum().sum()):,}")
-        c4.metric("Actions Clients", f"{int(df_stats_f[action_cols].sum().sum()):,}")
+    if not df_a_f.empty:
+        c1.metric("Note Moyenne", f"{df_a_f['Note_Std'].mean():.2f} ⭐")
+        c2.metric("Total Avis", f"{len(df_a_f):,}")
+    
+    if not df_s_f.empty:
+        vues_cols = [c for c in df_s_f.columns if "vues" in c.lower()]
+        actions_cols = [c for c in df_s_f.columns if any(k in c.lower() for k in ["appels", "visites", "demandes"])]
+        c3.metric("Visibilité (Vues)", f"{int(df_s_f[vues_cols].sum().sum()):,}")
+        c4.metric("Attractivité (Actions)", f"{int(df_s_f[actions_cols].sum().sum()):,}")
 
-    # 2. ONGLETS
-    tab_rep, tab_perf = st.tabs(["⭐ Réputation & Satisfaction", "🚀 Visibilité & Attractivité"])
+    # --- ONGLETS ---
+    tab1, tab2 = st.tabs(["⭐ Réputation & Satisfaction", "🚀 Performance & Flux"])
 
-    with tab_rep:
-        col_l, col_r = st.columns([2, 1])
-        with col_l:
-            st.subheader("Tendance de la note")
-            df_m = df_avis_f.set_index('Date').resample('M')['Note'].mean().reset_index()
-            fig = px.line(df_m, x='Date', y='Note', markers=True, range_y=[0,5], template="plotly_white")
-            st.plotly_chart(fig, use_container_width=True)
-        with col_r:
-            st.subheader("Mix des Notes")
-            fig_pie = px.pie(df_avis_f, names='Note', hole=0.4, color='Note', 
-                             color_discrete_map={5:'#2ecc71', 4:'#9b59b6', 3:'#f1c40f', 2:'#e67e22', 1:'#e74c3c'})
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-    with tab_perf:
-        col_l, col_r = st.columns(2)
-        with col_l:
-            st.subheader("Tunnel : Vues vs Actions")
-            views = [c for c in df_stats_f.columns if "vues" in c.lower()]
-            acts = [c for c in df_stats_f.columns if "action" in c.lower()]
-            df_v_a = df_stats_f.groupby(df_stats_f.columns[0])[[views[0], acts[0]]].sum().reset_index()
-            fig_dual = go.Figure()
-            fig_dual.add_trace(go.Bar(x=df_v_a[df_v_a.columns[0]], y=df_v_a[views[0]], name="Vues Google"))
-            fig_dual.add_trace(go.Scatter(x=df_v_a[df_v_a.columns[0]], y=df_v_a[acts[0]], name="Actions", yaxis="y2"))
-            fig_dual.update_layout(yaxis2=dict(overlaying='y', side='right'), template="plotly_white")
-            st.plotly_chart(fig_dual, use_container_width=True)
+    with tab1:
+        if not df_a_f.empty:
+            col_l, col_r = st.columns([2, 1])
+            with col_l:
+                st.subheader("Tendance de la note mensuelle")
+                df_evol = df_a_f.set_index('Date_Std').resample('M')['Note_Std'].mean().reset_index()
+                fig_note = px.line(df_evol, x='Date_Std', y='Note_Std', markers=True, range_y=[0, 5], template="plotly_white")
+                st.plotly_chart(fig_note, use_container_width=True)
             
-        with col_r:
-            st.subheader("Détail des Actions")
-            actions_data = df_stats_f[acts].sum().reset_index()
-            actions_data.columns = ['Action', 'Volume']
-            fig_act = px.bar(actions_data, x='Volume', y='Action', orientation='h', text_auto='.2s')
-            st.plotly_chart(fig_act, use_container_width=True)
+            with col_r:
+                st.subheader("Répartition des Étoiles")
+                fig_pie = px.pie(df_a_f, names='Note_Std', hole=0.4, color='Note_Std')
+                st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("Aucune donnée d'avis à afficher.")
+
+    with tab2:
+        if not df_s_f.empty:
+            col_l, col_r = st.columns(2)
+            
+            with col_l:
+                st.subheader("Tunnel : Vues vs Actions")
+                # Agrégation par mois
+                date_col = df_s_f.columns[0]
+                df_s_f['Mois'] = df_s_f[date_col].dt.to_period('M').dt.to_timestamp()
+                df_tunnel = df_s_f.groupby('Mois').agg({vues_cols[0]: 'sum', actions_cols[0]: 'sum'}).reset_index()
+                
+                fig_tunnel = go.Figure()
+                fig_tunnel.add_trace(go.Bar(x=df_tunnel['Mois'], y=df_tunnel[vues_cols[0]], name="Vues Google"))
+                fig_tunnel.add_trace(go.Scatter(x=df_tunnel['Mois'], y=df_tunnel[actions_cols[0]], name="Actions", yaxis="y2", line=dict(color='orange', width=3)))
+                fig_tunnel.update_layout(yaxis2=dict(overlaying='y', side='right'), title="Vues (Barres) vs Actions (Ligne)")
+                st.plotly_chart(fig_tunnel, use_container_width=True)
+
+            with col_r:
+                st.subheader("Top Actions Clients")
+                action_sums = df_s_f[actions_cols].sum().reset_index()
+                action_sums.columns = ['Type d\'action', 'Volume']
+                fig_act = px.bar(action_sums, x='Volume', y='Type d\'action', orientation='h', color='Type d\'action')
+                st.plotly_chart(fig_act, use_container_width=True)
+        else:
+            st.info("Aucune donnée de performance à afficher.")
 
 else:
-    st.info("💡 Chargez vos fichiers Excel pour générer le dashboard de pilotage.")
+    st.info("👋 Bonjour ! Pour générer votre dashboard, déposez vos fichiers **Avis** et **Monthly Performance** dans le menu de gauche.")
