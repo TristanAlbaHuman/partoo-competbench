@@ -1,86 +1,90 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import io
+import numpy as np
 
-def fix_stats_headers(df_raw):
-    """Fusionne la ligne 2 et 3 pour créer des noms de colonnes clairs."""
-    # On récupère les deux lignes d'en-tête
-    header_top = df_raw.iloc[1].fillna('')  # Ligne 2
-    header_bottom = df_raw.iloc[2].fillna('') # Ligne 3
+def process_universal_partoo(uploaded_file):
+    # 1. Lecture brute des premières lignes pour détection
+    preview = pd.read_excel(uploaded_file, header=None, nrows=5)
     
-    new_columns = []
-    current_category = ""
-    
-    for top, bottom in zip(header_top, header_bottom):
-        # Gestion du "Merge" Excel : si le haut est vide, on garde la catégorie précédente
-        if str(top).strip() != "":
-            current_category = str(top).strip()
+    # On regarde la ligne 3 (index 2) qui contient les titres dans les deux formats
+    header_row_content = str(preview.iloc[2].values).lower()
+
+    # --- CAS 1 : FICHIER STATS (Double entête) ---
+    if "recherche" in header_row_content or "action" in header_row_content:
+        df_raw = pd.read_excel(uploaded_file, header=None)
         
-        if current_category and bottom:
-            new_columns.append(f"{current_category} - {bottom}")
-        else:
-            new_columns.append(str(bottom) if bottom else str(top))
+        # Fusion des lignes 2 (index 1) et 3 (index 2)
+        h1 = df_raw.iloc[1].fillna(method='ffill').fillna('') # Catégories parentes
+        h2 = df_raw.iloc[2].fillna('') # Sous-catégories
+        
+        new_cols = []
+        for top, bottom in zip(h1, h2):
+            name = f"{top} - {bottom}".strip(" -")
+            new_cols.append(name)
             
-    return new_columns
+        df = df_raw.iloc[3:].copy()
+        df.columns = new_cols
+        df['Source_Type'] = "Stats"
 
-def process_file(uploaded_file):
-    # Lecture brute sans header pour analyser la structure
-    df_raw = pd.read_excel(uploaded_file, header=None)
-    
-    # --- DETECTION TYPE ---
-    # On regarde la ligne 3 (index 2) pour identifier le contenu
-    sample_row = str(df_raw.iloc[2].values).lower()
-    
-    if "recherches" in sample_row or "vues" in sample_row:
-        # C'EST UN FICHIER STATS
-        cols = fix_stats_headers(df_raw)
-        df = df_raw.iloc[3:].copy() # Données à partir de la ligne 4
-        df.columns = cols
-        df['Type_Fichier'] = "Stats"
+    # --- CAS 2 : FICHIER AVIS (Simple entête ligne 3) ---
     else:
-        # C'EST UN FICHIER AVIS (on garde ta logique d'index fixe)
-        df = df_raw.copy()
-        df.columns = [f"Col_{i}" for i in range(len(df.columns))]
-        # On renomme selon tes besoins Agence/Note/Groupe
-        df = df.rename(columns={'Col_0': 'Date', 'Col_3': 'Agence', 'Col_4': 'Groupe', 'Col_14': 'Note'})
-        df['Type_Fichier'] = "Avis"
+        # On démarre directement à la ligne 3 (skiprows=2)
+        df = pd.read_excel(uploaded_file, skiprows=2)
+        df.columns = [str(c).strip() for c in df.columns]
+        df['Source_Type'] = "Avis"
+        
+        # Mapping automatique pour uniformiser les Avis
+        # On cherche les colonnes par mots-clés pour éviter les erreurs d'index
+        mapping = {
+            'Date': ['date', 'période', 'mois'],
+            'Agence': ['établissement', 'agence', 'nom'],
+            'Note': ['note', 'étoile', 'rating'],
+            'Groupe': ['groupe', 'entreprise', 'tag']
+        }
+        
+        for final_name, keywords in mapping.items():
+            for col in df.columns:
+                if any(k in col.lower() for k in keywords):
+                    df = df.rename(columns={col: final_name})
+                    break
 
-    # Nettoyage Date (Colonne 0 dans les deux cas en général)
-    date_col = df.columns[0]
-    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
-    df = df.dropna(subset=[date_col])
-    
+    # --- NETTOYAGE COMMUN ---
+    # Identification de la colonne Date
+    date_col = next((c for c in df.columns if 'date' in c.lower() or 'mois' in c.lower()), None)
+    if date_col:
+        df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+        df = df.dropna(subset=[date_col])
+        df = df.sort_values(date_col)
+
     return df
 
-# --- INTERFACE STREAMLIT ---
-st.title("📊 Partoo Hub : Avis & Stats")
+# --- DANS TON APP STREAMLIT ---
+st.title("🛡️ Human Immobilier - Hub Partoo")
 
-files = st.sidebar.file_uploader("Charger Avis ou Stats", accept_multiple_files=True)
+files = st.sidebar.file_uploader("Glissez vos exports (Stats ou Avis)", accept_multiple_files=True)
 
 if files:
-    all_data = [process_file(f) for f in files]
+    all_dfs = [process_universal_partoo(f) for f in files]
     
-    # Séparation pour affichage
-    df_stats = pd.concat([d for d in all_data if d['Type_Fichier'].iloc[0] == "Stats"], ignore_index=True)
-    df_avis = pd.concat([d for d in all_data if d['Type_Fichier'].iloc[0] == "Avis"], ignore_index=True)
+    # Séparation des DataFrames par type pour les onglets
+    df_stats = pd.concat([d for d in all_dfs if d['Source_Type'].iloc[0] == "Stats"], ignore_index=True) if any(d['Source_Type'].iloc[0] == "Stats" for d in all_dfs) else pd.DataFrame()
+    df_avis = pd.concat([d for d in all_dfs if d['Source_Type'].iloc[0] == "Avis"], ignore_index=True) if any(d['Source_Type'].iloc[0] == "Avis" for d in all_dfs) else pd.DataFrame()
 
-    tab1, tab2 = st.tabs(["📈 Statistiques", "⭐ Avis Clients"])
+    tab1, tab2 = st.tabs(["📊 Performance (Stats)", "⭐ Réputation (Avis)"])
 
     with tab1:
         if not df_stats.empty:
-            st.write("Données de performance (Recherches, Vues, Actions)")
-            # Ici tu peux choisir une colonne fusionnée, ex: "Nombre de recherches - Directes"
-            target = st.selectbox("Choisir une métrique", [c for c in df_stats.columns if '-' in c])
-            fig = px.line(df_stats.sort_values(df_stats.columns[0]), x=df_stats.columns[0], y=target)
-            st.plotly_chart(fig)
+            # Sélecteur dynamique basé sur les colonnes fusionnées
+            metrics = [c for c in df_stats.columns if " - " in c]
+            sel_metric = st.selectbox("Choisir une métrique de performance", metrics)
+            fig = px.line(df_stats, x=df_stats.columns[0], y=sel_metric, color='Nom de l\'établissement')
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info("Chargez des fichiers de statistiques.")
+            st.info("Aucun fichier 'Stats' détecté.")
 
     with tab2:
         if not df_avis.empty:
-            st.write("Analyse des notes")
-            st.metric("Note Moyenne", f"{df_avis['Note'].mean():.2f} ⭐")
-            # Filtres agences ici...
-        else:
-            st.info("Chargez des fichiers d'avis.")
+            st.metric("Note Moyenne Globale", f"{df_avis['Note'].mean():.2f} ⭐")
+            # Graphique des notes
+            fig_avis = px.histogram(df_avis, x="Note", nbins=5, color="Note", title="Répartition des notes")
+            st.plotly_chart(fig_avis, use_container_width=True)
